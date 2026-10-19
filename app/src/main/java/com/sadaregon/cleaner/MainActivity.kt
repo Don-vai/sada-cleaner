@@ -78,7 +78,7 @@ class MainActivity : Activity() {
         }
 
         val scroll = ScrollView(this).apply {
-            fillViewport = true
+            isFillViewport = true
             addView(
                 root,
                 ViewGroup.LayoutParams(
@@ -338,8 +338,6 @@ class MainActivity : Activity() {
         )
 
         if (requestCode == 100) {
-            // Continue even if some permissions are denied.
-            // The scan will inspect only accessible locations.
             startScan()
         }
     }
@@ -424,10 +422,10 @@ class MainActivity : Activity() {
         var errors = 0
 
         val candidates = linkedSetOf<String>()
-
         val mediaSources = mutableListOf<android.net.Uri>()
 
-        if (hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ||
+        if (
+            hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ||
             Build.VERSION.SDK_INT >= 33
         ) {
             if (Build.VERSION.SDK_INT >= 33) {
@@ -503,7 +501,8 @@ class MainActivity : Activity() {
                             large++
                         }
 
-                        if (isReviewCandidate(name) &&
+                        if (
+                            isReviewCandidate(name) &&
                             candidates.size < 100
                         ) {
                             candidates.add(name)
@@ -515,7 +514,7 @@ class MainActivity : Activity() {
             }
         }
 
-        // Scan this app's own cache, which does not need broad storage access.
+        // Scan only this app's own cache.
         val appDirs = listOfNotNull(
             cacheDir,
             externalCacheDir
@@ -535,7 +534,8 @@ class MainActivity : Activity() {
                             large++
                         }
 
-                        if (isReviewCandidate(file.name) &&
+                        if (
+                            isReviewCandidate(file.name) &&
                             candidates.size < 100
                         ) {
                             candidates.add(
