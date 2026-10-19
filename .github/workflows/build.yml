@@ -19,57 +19,67 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # 1. Download repository
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install Java 17
+      # 2. Java 17
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Configure Android SDK manually
-      # Avoid setup-android action's failing "tools" package
+      # 3. Find the existing Android SDK manager
       - name: Configure Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
 
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          if [ ! -d "$SDK/cmdline-tools" ]; then
+            echo "::error::Android SDK command-line tools directory not found: $SDK/cmdline-tools"
+            exit 1
+          fi
 
           SDKMANAGER="$(find "$SDK/cmdline-tools" \
             -type f -name sdkmanager 2>/dev/null \
             | sort -V | tail -n 1)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager was not found."
+            echo "::error::sdkmanager executable not found"
             exit 1
           fi
 
-          echo "Using SDK manager: $SDKMANAGER"
-          "$SDKMANAGER" --version
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
-      # 4. Accept licenses and install packages
+          echo "SDK path: $SDK"
+          echo "SDK Manager: $SDKMANAGER"
+          echo "SDKMANAGER_PATH=$SDKMANAGER" >> "$GITHUB_ENV"
+
+      # 4. Accept licenses and install Android packages
       - name: Install Android SDK, NDK and CMake
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDK="$ANDROID_HOME"
+          SDKMANAGER="$SDKMANAGER_PATH"
 
-          SDKMANAGER="$(find "$SDK/cmdline-tools" \
-            -type f -name sdkmanager 2>/dev/null \
-            | sort -V | tail -n 1)"
+          # Automatically accept all Android SDK licenses.
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses \
+            || {
+              STATUS="${PIPESTATUS[1]:-1}"
+              if [ "$STATUS" != "0" ]; then
+                echo "::error::Android SDK license acceptance failed"
+                exit 1
+              fi
+            }
 
-          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses
-
+          # Install each package by its exact SDK package ID.
           "$SDKMANAGER" --sdk_root="$SDK" \
             "platform-tools" \
             "platforms;android-35" \
@@ -77,23 +87,30 @@ jobs:
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
 
-      # 5. Install Gradle
+          # Verify essential packages.
+          test -d "$SDK/platforms/android-35"
+          test -d "$SDK/build-tools/35.0.0"
+          test -d "$SDK/ndk/27.2.12479018"
+
+          echo "Android SDK packages installed successfully."
+
+      # 5. Gradle
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      # 6. Install Rust
+      # 6. Rust toolchain
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      # 7. Configure Android linkers for Rust
+      # 7. Configure Rust Android linkers
       - name: Configure Rust Android linkers
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           NDK="$ANDROID_HOME/ndk/27.2.12479018"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -108,11 +125,11 @@ jobs:
           test -x "$TOOLCHAIN/armv7a-linux-androideabi24-clang"
           test -x "$TOOLCHAIN/x86_64-linux-android24-clang"
 
-      # 8. Build Rust static libraries
+      # 8. Build Rust libraries
       - name: Build Rust libraries
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cargo build \
             --manifest-path native-rust/Cargo.toml \
@@ -129,11 +146,11 @@ jobs:
             --release \
             --target x86_64-linux-android
 
-      # 9. Copy Rust libraries into ABI-specific folders
+      # 9. Copy Rust static libraries
       - name: Prepare Rust libraries
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           BASE="app/src/main/cpp/libs"
 
@@ -150,11 +167,11 @@ jobs:
           cp native-rust/target/x86_64-linux-android/release/libsada_cleaner_native.a \
             "$BASE/x86_64/"
 
-      # 10. Configure CMake to link the Rust library
+      # 10. Configure CMake and link Rust
       - name: Configure native CMake
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cat > app/src/main/cpp/CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.22.1)
@@ -187,7 +204,7 @@ jobs:
           )
 
           if(NOT EXISTS "${RUST_LIBRARY}")
-              message(FATAL_ERROR "Rust library not found: ${RUST_LIBRARY}")
+              message(FATAL_ERROR "Rust library missing: ${RUST_LIBRARY}")
           endif()
 
           add_library(sada_rust STATIC IMPORTED)
