@@ -1,4 +1,3 @@
-
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -7,7 +6,7 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!-- Android 13+ -->
+    <!-- Android 13+ : Images, Videos, Audio -->
     <uses-permission
         android:name="android.permission.READ_MEDIA_IMAGES" />
 
@@ -16,6 +15,10 @@
 
     <uses-permission
         android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- Android 14+ : User-selected photos and videos -->
+    <uses-permission
+        android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
     <application
         android:allowBackup="false"
