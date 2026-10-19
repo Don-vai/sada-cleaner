@@ -4,59 +4,129 @@ name: Build SADA Cleaner APK
 'on':
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
+      # 1. Download repository code
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Install Java
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK, NDK and CMake
+      # 3. Initialize Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools,platforms;android-35,build-tools;35.0.0,ndk;27.2.12479018,cmake;3.22.1'
 
+      # 4. Install SDK packages individually
+      - name: Install Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          set -e
+
+          sdkmanager --licenses
+
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-35"
+          sdkmanager "build-tools;35.0.0"
+          sdkmanager "ndk;27.2.12479018"
+          sdkmanager "cmake;3.22.1"
+
+      # 5. Install Gradle
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
+      # 6. Install Rust
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
+      # 7. Configure Rust Android linkers
       - name: Configure Android Rust linkers
         shell: bash
         run: |
+          set -e
+
           NDK="$ANDROID_HOME/ndk/27.2.12479018"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$TOOLCHAIN/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$TOOLCHAIN/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
 
-      - name: Build Rust libraries
-        run: |
-          cargo build --manifest-path native-rust/Cargo.toml --release --target aarch64-linux-android
-          cargo build --manifest-path native-rust/Cargo.toml --release --target armv7-linux-androideabi
-          cargo build --manifest-path native-rust/Cargo.toml --release --target x86_64-linux-android
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang"
+          test -x "$TOOLCHAIN/armv7a-linux-androideabi24-clang"
+          test -x "$TOOLCHAIN/x86_64-linux-android24-clang"
 
+      # 8. Compile Rust for Android architectures
+      - name: Build Rust libraries
+        shell: bash
+        run: |
+          set -e
+
+          cargo build \
+            --manifest-path native-rust/Cargo.toml \
+            --release \
+            --target aarch64-linux-android
+
+          cargo build \
+            --manifest-path native-rust/Cargo.toml \
+            --release \
+            --target armv7-linux-androideabi
+
+          cargo build \
+            --manifest-path native-rust/Cargo.toml \
+            --release \
+            --target x86_64-linux-android
+
+      # 9. Prepare Rust libraries for CMake
+      - name: Copy Rust libraries
+        shell: bash
+        run: |
+          set -e
+
+          BASE="app/src/main/cpp/libs"
+
+          mkdir -p "$BASE/arm64-v8a"
+          mkdir -p "$BASE/armeabi-v7a"
+          mkdir -p "$BASE/x86_64"
+
+          cp native-rust/target/aarch64-linux-android/release/libsada_cleaner_native.a \
+            "$BASE/arm64-v8a/"
+
+          cp native-rust/target/armv7-linux-androideabi/release/libsada_cleaner_native.a \
+            "$BASE/armeabi-v7a/"
+
+          cp native-rust/target/x86_64-linux-android/release/libsada_cleaner_native.a \
+            "$BASE/x86_64/"
+
+      # 10. Build debug APK
       - name: Build debug APK
         run: gradle assembleDebug
 
+      # 11. Save APK as a downloadable workflow artifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
