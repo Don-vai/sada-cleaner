@@ -6,7 +6,7 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!-- Android 13+ : Images, Videos, Audio -->
+    <!-- Android 13+ media access -->
     <uses-permission
         android:name="android.permission.READ_MEDIA_IMAGES" />
 
@@ -16,7 +16,7 @@
     <uses-permission
         android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- Android 14+ : User-selected photos and videos -->
+    <!-- Android 14+ selected visual media access -->
     <uses-permission
         android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
