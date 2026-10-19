@@ -1,7 +1,7 @@
 
 cmake_minimum_required(VERSION 3.22.1)
 
-project("sada_cleaner")
+project(sada_cleaner LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,5 +20,6 @@ find_library(
 
 target_link_libraries(
     sada_native
+    PRIVATE
     ${log-lib}
 )
