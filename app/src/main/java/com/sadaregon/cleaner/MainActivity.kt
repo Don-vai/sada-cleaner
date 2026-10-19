@@ -1,18 +1,19 @@
+
 package com.sadaregon.cleaner
 
 import android.Manifest
 import android.app.Activity
-import android.app.PendingIntent
+import android.app.AlertDialog
 import android.content.ContentUris
-import android.content.IntentSender
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.StatFs
 import android.provider.MediaStore
+import android.graphics.Color
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -23,252 +24,213 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.io.InputStream
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
 
-    private val bg = Color.rgb(9, 12, 27)
-    private val card = Color.rgb(23, 28, 49)
-    private val purple = Color.rgb(139, 92, 246)
-    private val cyan = Color.rgb(34, 211, 238)
-    private val white = Color.rgb(246, 247, 255)
-    private val muted = Color.rgb(159, 169, 195)
-    private val green = Color.rgb(74, 222, 128)
-
-    private val executor = Executors.newSingleThreadExecutor()
-
-    private lateinit var scanButton: Button
-    private lateinit var deleteButton: Button
-    private lateinit var statusText: TextView
-    private lateinit var progress: ProgressBar
-    private lateinit var progressText: TextView
-    private lateinit var summaryText: TextView
-    private lateinit var resultList: LinearLayout
-
-    private var scanning = false
-    private var deleting = false
-
-    private val items = mutableListOf<ScanItem>()
-    private val selectedUris = linkedSetOf<String>()
-
-    private val largeLimit = 100L * 1024L * 1024L
-
-    private data class ScanItem(
+    private data class MediaItem(
         val uri: Uri,
         val name: String,
         val size: Long,
-        val category: String,
-        val junkCandidate: Boolean,
-        val large: Boolean,
-        val possibleDuplicate: Boolean
+        val kind: String,
+        var reason: String = "",
+        var checked: Boolean = false
     )
 
-    private data class ScanReport(
-        val files: List<ScanItem>,
-        val errors: Int,
-        val totalBytes: Long
-    )
+    private lateinit var root: LinearLayout
+    private lateinit var storageText: TextView
+    private lateinit var statusText: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var progressText: TextView
+    private lateinit var resultsBox: LinearLayout
+    private lateinit var scanButton: Button
+    private lateinit var deleteButton: Button
+
+    private val worker = Executors.newSingleThreadExecutor()
+    private val scanning = AtomicBoolean(false)
+    private val candidates = mutableListOf<MediaItem>()
+
+    companion object {
+        private const val REQUEST_PERMISSIONS = 410
+        private const val REQUEST_DELETE = 411
+        private const val LARGE_FILE_BYTES = 100L * 1024L * 1024L
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        buildUi()
+        updateStorageInfo()
 
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
+        scanButton.setOnClickListener {
+            requestPermissionsAndScan()
+        }
 
-        buildDashboard()
+        deleteButton.setOnClickListener {
+            confirmDeleteSelected()
+        }
     }
 
-    private fun buildDashboard() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(28))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    Color.rgb(22, 19, 48),
-                    bg,
-                    Color.rgb(8, 15, 30)
-                )
-            )
-        }
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
 
-        val scroll = ScrollView(this).apply {
-            isFillViewport = true
-            addView(
-                root,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
+    private fun makeText(
+        value: String,
+        size: Float,
+        color: Int
+    ) = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(color)
+    }
 
-        root.addView(label("SADA CLEANER", 27, white, true))
-        root.addView(label("REAL STORAGE SCANNER", 12, cyan, true))
-        root.addView(space(8))
-        root.addView(
-            label(
-                "Scan accessible media, review large files and inspect cleanup candidates.",
-                14,
-                muted
-            )
-        )
-
-        root.addView(space(22))
-
-        val overview = makeCard()
-        overview.addView(label("DEVICE OVERVIEW", 13, muted, true))
-        overview.addView(space(10))
-
-        statusText = label("READY TO SCAN", 14, green, true)
-        overview.addView(statusText)
-
-        summaryText = label(
-            "No scan performed yet.",
-            14,
-            white
-        )
-        overview.addView(space(10))
-        overview.addView(summaryText)
-        root.addView(overview)
-
-        root.addView(space(16))
-
-        scanButton = Button(this).apply {
-            text = "SCAN DEVICE"
+    private fun makeButton(value: String) =
+        Button(this).apply {
+            text = value
             isAllCaps = false
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            background = rounded(purple, 16)
-            setOnClickListener { beginScan() }
+        }
+
+    private fun matchWrap() =
+        LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+    private fun buildUi() {
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            setBackgroundColor(Color.rgb(12, 17, 30))
         }
 
         root.addView(
-            scanButton,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(56)
-            )
+            makeText("SADA CLEANER", 25f, Color.WHITE).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(8), 0, dp(16))
+            },
+            matchWrap()
         )
 
-        root.addView(space(12))
+        storageText = makeText(
+            "Checking storage…",
+            15f,
+            Color.rgb(150, 220, 255)
+        )
+        root.addView(storageText, matchWrap())
 
-        val progressCard = makeCard()
-        progressText = label("Waiting for scan...", 13, muted)
-        progressCard.addView(progressText)
-        progressCard.addView(space(10))
+        statusText = makeText(
+            "Scan accessible phone media.",
+            14f,
+            Color.LTGRAY
+        ).apply {
+            setPadding(0, dp(12), 0, dp(8))
+        }
+        root.addView(statusText, matchWrap())
 
-        progress = ProgressBar(
+        progressBar = ProgressBar(
             this,
             null,
             android.R.attr.progressBarStyleHorizontal
         ).apply {
             max = 100
             progress = 0
-            progressTintList =
-                android.content.res.ColorStateList.valueOf(cyan)
         }
 
-        progressCard.addView(
-            progress,
+        root.addView(
+            progressBar,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(8)
             )
         )
 
-        root.addView(progressCard)
-        root.addView(space(20))
+        progressText = makeText("Ready", 13f, Color.WHITE)
+        root.addView(progressText, matchWrap())
 
-        root.addView(label("SCAN RESULTS", 15, white, true))
-        root.addView(space(8))
+        scanButton = makeButton("SCAN PHONE MEDIA")
+        root.addView(scanButton, matchWrap())
 
-        root.addView(
-            label(
-                "Select only the files you have reviewed. Large files are not automatically junk.",
-                12,
-                muted
-            )
-        )
-
-        root.addView(space(10))
-
-        deleteButton = Button(this).apply {
-            text = "DELETE SELECTED FILES"
-            isAllCaps = false
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            background = rounded(Color.rgb(170, 48, 65), 14)
-            isEnabled = false
-            setOnClickListener { confirmDelete() }
-        }
+        deleteButton = makeButton("DELETE SELECTED FILES")
+        deleteButton.isEnabled = false
+        root.addView(deleteButton, matchWrap())
 
         root.addView(
-            deleteButton,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(52)
-            )
+            makeText(
+                "Review files before deleting",
+                18f,
+                Color.WHITE
+            ).apply {
+                setPadding(0, dp(18), 0, dp(8))
+            },
+            matchWrap()
         )
 
-        root.addView(space(14))
-
-        resultList = LinearLayout(this).apply {
+        resultsBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        root.addView(resultList)
 
-        root.addView(space(22))
-        root.addView(
-            label(
-                "PRIVACY FIRST • REVIEW BEFORE DELETING",
-                11,
-                muted,
-                true
-            ).apply { gravity = Gravity.CENTER }
-        )
-
-        root.addView(space(8))
-        root.addView(
-            label(
-                "DEVELOPED BY SADA REGON",
-                11,
-                muted
-            ).apply { gravity = Gravity.CENTER }
-        )
-
-        setContentView(scroll)
-    }
-
-    private fun beginScan() {
-        if (scanning || deleting) return
-
-        val missing = requiredPermissions().filter {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(resultsBox)
         }
 
-        if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), 100)
-            return
-        }
+        root.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
 
-        startScan()
+        setContentView(root)
     }
 
-    private fun requiredPermissions(): List<String> {
-        return if (Build.VERSION.SDK_INT >= 33) {
-            listOf(
+    private fun hasPermission(permission: String): Boolean =
+        checkSelfPermission(permission) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun requiredPermissions(): Array<String> {
+        return when {
+            Build.VERSION.SDK_INT >= 34 -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_AUDIO,
+                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+            )
+
+            Build.VERSION.SDK_INT >= 33 -> arrayOf(
                 Manifest.permission.READ_MEDIA_IMAGES,
                 Manifest.permission.READ_MEDIA_VIDEO,
                 Manifest.permission.READ_MEDIA_AUDIO
             )
-        } else {
-            listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+
+            else -> arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            )
         }
     }
 
+    private fun requestPermissionsAndScan() {
+        if (scanning.get()) return
+
+        val permissions = requiredPermissions()
+        val missing = permissions.filterNot { hasPermission(it) }
+
+        if (missing.isEmpty()) {
+            startScan()
+        } else {
+            requestPermissions(
+                missing.toTypedArray(),
+                REQUEST_PERMISSIONS
+            )
+        }
+    }
+
+    @Deprecated("Uses Android's permission callback")
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -280,489 +242,472 @@ class MainActivity : Activity() {
             grantResults
         )
 
-        if (requestCode == 100) {
-            if (requiredPermissions().any {
-                    checkSelfPermission(it) ==
-                        PackageManager.PERMISSION_GRANTED
-                }) {
-                startScan()
-            } else {
-                statusText.text = "PERMISSION NEEDED"
-                progressText.text =
-                    "Allow media access to scan your files."
-                Toast.makeText(
-                    this,
-                    "No media permission granted",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
+        if (requestCode != REQUEST_PERMISSIONS) return
+
+        val canRead = if (Build.VERSION.SDK_INT >= 33) {
+            hasPermission(Manifest.permission.READ_MEDIA_IMAGES) ||
+                hasPermission(Manifest.permission.READ_MEDIA_VIDEO) ||
+                hasPermission(Manifest.permission.READ_MEDIA_AUDIO) ||
+                (
+                    Build.VERSION.SDK_INT >= 34 &&
+                    hasPermission(
+                        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+                    )
+                )
+        } else {
+            hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+        if (canRead) {
+            startScan()
+        } else {
+            toast("Media permission nahi mili.")
         }
     }
 
     private fun startScan() {
-        if (scanning || deleting) return
+        if (!scanning.compareAndSet(false, true)) return
 
-        scanning = true
         scanButton.isEnabled = false
         deleteButton.isEnabled = false
-        scanButton.text = "SCANNING..."
-        statusText.text = "SCAN IN PROGRESS"
-        statusText.setTextColor(cyan)
-        progress.progress = 0
-        progressText.text = "Preparing storage scan..."
-        summaryText.text = "Reading accessible media..."
-        resultList.removeAllViews()
-        items.clear()
-        selectedUris.clear()
+        resultsBox.removeAllViews()
+        candidates.clear()
+        progressBar.progress = 0
+        progressText.text = "Preparing scan…"
+        statusText.text = "Scanning accessible media files…"
 
-        executor.execute {
-            val report = performScan()
+        worker.execute {
+            try {
+                val files = queryAccessibleMedia()
+                val total = files.size
+                val found = LinkedHashMap<String, MediaItem>()
 
-            runOnUiThread {
-                scanning = false
-                scanButton.isEnabled = true
-                scanButton.text = "SCAN AGAIN"
-                progress.progress = 100
-                progressText.text = "Scan completed"
-                statusText.text = "SCAN COMPLETE"
-                statusText.setTextColor(green)
+                // Identical content hashes identify exact duplicates.
+                val firstByHash = HashMap<String, MediaItem>()
 
-                items.clear()
-                items.addAll(report.files)
+                files.forEachIndexed { index, item ->
+                    if (Thread.currentThread().isInterrupted) {
+                        return@forEachIndexed
+                    }
 
-                val largeCount = items.count { it.large }
-                val junkCount = items.count { it.junkCandidate }
-                val duplicateCount = items.count {
-                    it.possibleDuplicate
-                }
-
-                summaryText.text =
-                    "Accessible files: ${items.size}\n" +
-                    "Media size total: ${formatBytes(report.totalBytes)}\n" +
-                    "Large files (100 MB+): $largeCount\n" +
-                    "Junk-name candidates: $junkCount\n" +
-                    "Possible duplicate photos: $duplicateCount\n" +
-                    "Read errors: ${report.errors}"
-
-                if (items.isEmpty()) {
-                    resultList.addView(
-                        label(
-                            "No accessible media files found. Check permissions or device storage.",
-                            14,
-                            muted
+                    if (item.size >= LARGE_FILE_BYTES) {
+                        item.reason = addReason(
+                            item.reason,
+                            "Large file (100 MB+)"
                         )
-                    )
-                } else {
-                    showResults()
+                        found[item.uri.toString()] = item
+                    }
+
+                    val lower = item.name.lowercase(Locale.ROOT)
+
+                    if (
+                        lower.endsWith(".tmp") ||
+                        lower.endsWith(".temp") ||
+                        lower.endsWith(".bak") ||
+                        lower.endsWith(".old") ||
+                        lower.endsWith(".log") ||
+                        lower.endsWith(".cache")
+                    ) {
+                        item.reason = addReason(
+                            item.reason,
+                            "Possible junk filename"
+                        )
+                        found[item.uri.toString()] = item
+                    }
+
+                    // Hashing may take time for large files.
+                    val hash = try {
+                        sha256(item.uri)
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                    if (hash != null) {
+                        val original = firstByHash[hash]
+
+                        if (original == null) {
+                            firstByHash[hash] = item
+                        } else {
+                            original.reason = addReason(
+                                original.reason,
+                                "Exact duplicate content"
+                            )
+                            item.reason = addReason(
+                                item.reason,
+                                "Exact duplicate content"
+                            )
+
+                            found[original.uri.toString()] = original
+                            found[item.uri.toString()] = item
+                        }
+                    }
+
+                    val done = index + 1
+                    val percent = if (total > 0) {
+                        done * 100 / total
+                    } else {
+                        100
+                    }
+
+                    runOnUiThread {
+                        progressBar.progress = percent
+                        progressText.text =
+                            "Checked $done / $total files ($percent%)"
+                    }
                 }
 
-                Toast.makeText(
-                    this,
-                    "Scan finished: ${items.size} files checked",
-                    Toast.LENGTH_LONG
-                ).show()
+                runOnUiThread {
+                    candidates.clear()
+                    candidates.addAll(found.values)
+
+                    renderResults()
+                    updateStorageInfo()
+
+                    statusText.text =
+                        "Scan complete: $total accessible files checked. " +
+                        "${candidates.size} files need review."
+
+                    progressBar.progress = 100
+                    progressText.text = "100% complete"
+                    scanButton.isEnabled = true
+                    deleteButton.isEnabled = candidates.any {
+                        it.checked
+                    }
+                    scanning.set(false)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    statusText.text =
+                        "Scan failed: ${e.message ?: "Unknown error"}"
+                    progressText.text = "Scan stopped"
+                    scanButton.isEnabled = true
+                    scanning.set(false)
+                }
             }
         }
     }
 
-    private fun performScan(): ScanReport {
-        val found = mutableListOf<ScanItem>()
-        var errors = 0
-        var totalBytes = 0L
+    private fun addReason(old: String, next: String): String {
+        if (old.isBlank()) return next
+        if (old.contains(next)) return old
+        return "$old • $next"
+    }
 
-        val sources = mutableListOf<Pair<Uri, String>>()
+    private fun queryAccessibleMedia(): List<MediaItem> {
+        val result = mutableListOf<MediaItem>()
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (hasPermission(Manifest.permission.READ_MEDIA_IMAGES)) {
-                sources.add(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI to "Photo"
+        val imagePermission = Build.VERSION.SDK_INT < 33 ||
+            hasPermission(Manifest.permission.READ_MEDIA_IMAGES) ||
+            (
+                Build.VERSION.SDK_INT >= 34 &&
+                hasPermission(
+                    "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
                 )
-            }
-            if (hasPermission(Manifest.permission.READ_MEDIA_VIDEO)) {
-                sources.add(
-                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI to "Video"
-                )
-            }
-            if (hasPermission(Manifest.permission.READ_MEDIA_AUDIO)) {
-                sources.add(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to "Audio"
-                )
-            }
-        } else if (
-            hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
-        ) {
-            sources.add(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI to "Photo"
             )
-            sources.add(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI to "Video"
-            )
-            sources.add(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to "Audio"
+
+        val videoPermission = Build.VERSION.SDK_INT < 33 ||
+            hasPermission(Manifest.permission.READ_MEDIA_VIDEO)
+
+        val audioPermission = Build.VERSION.SDK_INT < 33 ||
+            hasPermission(Manifest.permission.READ_MEDIA_AUDIO)
+
+        if (imagePermission) {
+            queryCollection(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                "image",
+                result
             )
         }
 
+        if (videoPermission) {
+            queryCollection(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                "video",
+                result
+            )
+        }
+
+        if (audioPermission) {
+            queryCollection(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                "audio",
+                result
+            )
+        }
+
+        return result
+    }
+
+    private fun queryCollection(
+        collection: Uri,
+        kind: String,
+        output: MutableList<MediaItem>
+    ) {
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE
         )
 
-        for ((sourceUri, category) in sources) {
-            try {
-                contentResolver.query(
-                    sourceUri,
-                    projection,
-                    null,
-                    null,
-                    null
-                )?.use { cursor ->
-                    val idIndex = cursor.getColumnIndex(
-                        MediaStore.MediaColumns._ID
-                    )
-                    val nameIndex = cursor.getColumnIndex(
-                        MediaStore.MediaColumns.DISPLAY_NAME
-                    )
-                    val sizeIndex = cursor.getColumnIndex(
-                        MediaStore.MediaColumns.SIZE
-                    )
+        try {
+            contentResolver.query(
+                collection,
+                projection,
+                null,
+                null,
+                "${MediaStore.MediaColumns.SIZE} DESC"
+            )?.use { cursor ->
 
-                    while (cursor.moveToNext()) {
-                        if (idIndex < 0) continue
+                val idColumn = cursor.getColumnIndexOrThrow(
+                    MediaStore.MediaColumns._ID
+                )
+                val nameColumn = cursor.getColumnIndexOrThrow(
+                    MediaStore.MediaColumns.DISPLAY_NAME
+                )
+                val sizeColumn = cursor.getColumnIndexOrThrow(
+                    MediaStore.MediaColumns.SIZE
+                )
 
-                        val id = cursor.getLong(idIndex)
-                        val name = if (nameIndex >= 0) {
-                            cursor.getString(nameIndex) ?: "Unnamed file"
-                        } else {
-                            "Unnamed file"
-                        }
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idColumn)
 
-                        val size = if (sizeIndex >= 0) {
-                            cursor.getLong(sizeIndex).coerceAtLeast(0L)
-                        } else {
-                            0L
-                        }
-
-                        val uri = ContentUris.withAppendedId(
-                            sourceUri,
-                            id
+                    output.add(
+                        MediaItem(
+                            uri = ContentUris.withAppendedId(
+                                collection,
+                                id
+                            ),
+                            name = cursor.getString(nameColumn)
+                                ?: "Unknown file",
+                            size = cursor.getLong(sizeColumn)
+                                .coerceAtLeast(0L),
+                            kind = kind
                         )
-
-                        totalBytes += size
-
-                        found.add(
-                            ScanItem(
-                                uri = uri,
-                                name = name,
-                                size = size,
-                                category = category,
-                                junkCandidate = isJunkName(name),
-                                large = size >= largeLimit,
-                                possibleDuplicate = false
-                            )
-                        )
-                    }
+                    )
                 }
-            } catch (_: SecurityException) {
-                errors++
-            } catch (_: Exception) {
-                errors++
+            }
+        } catch (_: SecurityException) {
+            // Some media may not be accessible.
+        } catch (_: Exception) {
+            // Continue scanning other collections.
+        }
+    }
+
+    private fun sha256(uri: Uri): String? {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val stream: InputStream =
+            contentResolver.openInputStream(uri) ?: return null
+
+        stream.use { input ->
+            val buffer = ByteArray(64 * 1024)
+
+            while (true) {
+                val count = input.read(buffer)
+                if (count <= 0) break
+                digest.update(buffer, 0, count)
             }
         }
 
-        // Same-size images are only possible duplicates, not confirmed ones.
-        val imageSizeCounts = found
-            .filter { it.category == "Photo" && it.size > 0L }
-            .groupingBy { it.size }
-            .eachCount()
-
-        val marked = found.map { item ->
-            item.copy(
-                possibleDuplicate =
-                    item.category == "Photo" &&
-                    item.size > 0L &&
-                    (imageSizeCounts[item.size] ?: 0) > 1
-            )
+        return digest.digest().joinToString("") {
+            "%02x".format(it)
         }
-
-        runOnUiThread {
-            progressText.text =
-                "Checked ${marked.size} accessible media files..."
-        }
-
-        return ScanReport(
-            files = marked,
-            errors = errors,
-            totalBytes = totalBytes
-        )
     }
 
-    private fun showResults() {
-        resultList.removeAllViews()
-        selectedUris.clear()
+    private fun renderResults() {
+        resultsBox.removeAllViews()
 
-        val reviewItems = items.filter {
-            it.large || it.junkCandidate || it.possibleDuplicate
-        }
-
-        val displayItems = reviewItems.distinctBy { it.uri.toString() }
-
-        if (displayItems.isEmpty()) {
-            resultList.addView(
-                label(
-                    "No review candidates found. Your accessible media was scanned.",
-                    14,
-                    green
+        if (candidates.isEmpty()) {
+            resultsBox.addView(
+                makeText(
+                    "No matching files found in accessible media.",
+                    14f,
+                    Color.LTGRAY
                 )
             )
             deleteButton.isEnabled = false
             return
         }
 
-        displayItems.forEach { item ->
-            val itemCard = makeCard()
-            itemCard.addView(
-                label(item.name, 14, white, true)
-            )
-            itemCard.addView(space(5))
+        candidates.forEach { item ->
+            val check = CheckBox(this).apply {
+                text = "${item.name}\n" +
+                    "${formatBytes(item.size)} • ${item.kind}\n" +
+                    item.reason
 
-            val tags = mutableListOf<String>()
-            tags.add(item.category)
-            tags.add(formatBytes(item.size))
-            if (item.large) tags.add("Large")
-            if (item.junkCandidate) tags.add("Possible junk")
-            if (item.possibleDuplicate) {
-                tags.add("Possible duplicate size")
-            }
-
-            itemCard.addView(
-                label(tags.joinToString(" • "), 11, cyan)
-            )
-            itemCard.addView(space(6))
-
-            val checkBox = CheckBox(this).apply {
-                text = "Select for deletion"
                 textSize = 13f
-                setTextColor(white)
+                setTextColor(Color.WHITE)
+                setPadding(dp(4), dp(8), dp(4), dp(8))
+                isChecked = false
 
                 setOnCheckedChangeListener { _, checked ->
-                    val key = item.uri.toString()
-                    if (checked) {
-                        selectedUris.add(key)
-                    } else {
-                        selectedUris.remove(key)
-                    }
-                    deleteButton.isEnabled = selectedUris.isNotEmpty()
+                    item.checked = checked
+                    deleteButton.isEnabled =
+                        candidates.any { it.checked }
                 }
             }
 
-            itemCard.addView(checkBox)
-            resultList.addView(itemCard)
-            resultList.addView(space(8))
+            resultsBox.addView(check, matchWrap())
+
+            resultsBox.addView(
+                View(this).apply {
+                    setBackgroundColor(Color.rgb(50, 60, 78))
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(1)
+                )
+            )
         }
 
-        resultList.addView(
-            label(
-                "Only review candidates are listed here. " +
-                    "A large file or matching file size does not prove that it is junk or a duplicate.",
-                12,
-                muted
-            )
-        )
+        deleteButton.isEnabled = false
     }
 
-    private fun confirmDelete() {
-        if (selectedUris.isEmpty() || deleting) return
+    private fun confirmDeleteSelected() {
+        val selected = candidates.filter { it.checked }
 
-        android.app.AlertDialog.Builder(this)
+        if (selected.isEmpty()) {
+            toast("Pehle files select karo.")
+            return
+        }
+
+        AlertDialog.Builder(this)
             .setTitle("Delete selected files?")
             .setMessage(
-                "You selected ${selectedUris.size} file(s). " +
-                    "Deleted files may not be recoverable. Continue only if you checked each item."
+                "${selected.size} selected files delete karne ki " +
+                "permission maangi jayegi. Delete karne se pehle " +
+                "file names check kar lo."
             )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Continue") { _, _ ->
-                deleteSelected()
+                deleteSelected(selected)
             }
             .show()
     }
 
-    private fun deleteSelected() {
-        if (deleting || selectedUris.isEmpty()) return
-
-        val selected = items.filter {
-            selectedUris.contains(it.uri.toString())
-        }
-
-        if (selected.isEmpty()) return
-
-        if (Build.VERSION.SDK_INT >= 30) {
+    private fun deleteSelected(selected: List<MediaItem>) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                val pendingIntent: PendingIntent =
-                    MediaStore.createDeleteRequest(
-                        contentResolver,
-                        selected.map { it.uri }
-                    )
+                val request = MediaStore.createDeleteRequest(
+                    contentResolver,
+                    selected.map { it.uri }
+                )
 
-                deleting = true
+                @Suppress("DEPRECATION")
                 startIntentSenderForResult(
-                    pendingIntent.intentSender,
-                    200,
+                    request.intentSender,
+                    REQUEST_DELETE,
                     null,
                     0,
                     0,
                     0
                 )
-            } catch (_: Exception) {
-                deleting = false
-                Toast.makeText(
-                    this,
-                    "Could not request system delete approval.",
-                    Toast.LENGTH_LONG
-                ).show()
+            } catch (e: Exception) {
+                toast(
+                    "Delete request failed: " +
+                    (e.message ?: "Unknown error")
+                )
             }
         } else {
-            // Older Android versions may reject deletion of media
-            // that this app does not own.
-            executor.execute {
-                var deleted = 0
-                var failed = 0
+            var deleted = 0
 
-                for (item in selected) {
-                    try {
-                        if (
-                            contentResolver.delete(
-                                item.uri,
-                                null,
-                                null
-                            ) > 0
-                        ) {
-                            deleted++
-                        } else {
-                            failed++
-                        }
-                    } catch (_: Exception) {
-                        failed++
+            selected.forEach { item ->
+                try {
+                    if (
+                        contentResolver.delete(
+                            item.uri,
+                            null,
+                            null
+                        ) > 0
+                    ) {
+                        deleted++
                     }
-                }
-
-                runOnUiThread {
-                    selectedUris.clear()
-                    Toast.makeText(
-                        this,
-                        "Deleted: $deleted • Could not delete: $failed",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    startScan()
+                } catch (_: Exception) {
+                    // Android can reject deletion of files not owned by this app.
                 }
             }
-        }
-    }
 
-    @Deprecated("Deprecated by Android; retained for Android 9+ compatibility")
-    override fun onActivityResult(
-        requestCode: Int,
-        resultCode: Int,
-        data: android.content.Intent?
-    ) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == 200) {
-            deleting = false
-            selectedUris.clear()
-
-            Toast.makeText(
-                this,
-                if (resultCode == RESULT_OK) {
-                    "System approved the delete request."
-                } else {
-                    "Delete request cancelled."
-                },
-                Toast.LENGTH_LONG
-            ).show()
+            toast(
+                "$deleted files deleted. Kuch files ke liye " +
+                "Android permission required ho sakti hai."
+            )
 
             startScan()
         }
     }
 
-    private fun hasPermission(permission: String): Boolean {
-        return checkSelfPermission(permission) ==
-            PackageManager.PERMISSION_GRANTED
+    @Deprecated("Uses Android's activity result callback")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQUEST_DELETE) {
+            if (resultCode == RESULT_OK) {
+                toast("Delete request approved.")
+            } else {
+                toast("Delete cancelled.")
+            }
+
+            startScan()
+        }
     }
 
-    private fun isJunkName(name: String): Boolean {
-        val lower = name.lowercase(Locale.ROOT)
+    private fun updateStorageInfo() {
+        try {
+            val stat = StatFs(
+                Environment.getDataDirectory().path
+            )
 
-        return lower.endsWith(".tmp") ||
-            lower.endsWith(".temp") ||
-            lower.endsWith(".bak") ||
-            lower.endsWith(".old") ||
-            lower.endsWith(".log") ||
-            lower.endsWith(".cache")
+            val total =
+                stat.blockCountLong * stat.blockSizeLong
+            val free =
+                stat.availableBlocksLong * stat.blockSizeLong
+            val used = (total - free).coerceAtLeast(0L)
+
+            storageText.text =
+                "Device data storage\n" +
+                "Used: ${formatBytes(used)} / ${formatBytes(total)}\n" +
+                "Available: ${formatBytes(free)}"
+        } catch (_: Exception) {
+            storageText.text = "Storage information unavailable"
+        }
     }
 
     private fun formatBytes(bytes: Long): String {
-        if (bytes < 1024L) return "$bytes B"
+        if (bytes < 1024) return "$bytes B"
 
-        val kb = bytes / 1024.0
-        if (kb < 1024.0) return "%.1f KB".format(kb)
+        val units = arrayOf("KB", "MB", "GB", "TB")
+        var value = bytes.toDouble()
+        var unit = -1
 
-        val mb = kb / 1024.0
-        if (mb < 1024.0) return "%.1f MB".format(mb)
+        do {
+            value /= 1024.0
+            unit++
+        } while (
+            value >= 1024 &&
+            unit < units.lastIndex
+        )
 
-        val gb = mb / 1024.0
-        return "%.2f GB".format(gb)
+        return String.format(
+            Locale.getDefault(),
+            "%.1f %s",
+            value,
+            units[unit]
+        )
     }
 
-    private fun makeCard(): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = rounded(card, 18)
-        }
-    }
-
-    private fun label(
-        value: String,
-        size: Int,
-        color: Int,
-        bold: Boolean = false
-    ): TextView {
-        return TextView(this).apply {
-            text = value
-            textSize = size.toFloat()
-            setTextColor(color)
-            if (bold) typeface = Typeface.DEFAULT_BOLD
-        }
-    }
-
-    private fun space(height: Int): View {
-        return View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                1,
-                dp(height)
-            )
-        }
-    }
-
-    private fun rounded(
-        color: Int,
-        radius: Int
-    ): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = dp(radius).toFloat()
-        }
-    }
-
-    private fun dp(value: Int): Int {
-        return (
-            value * resources.displayMetrics.density
-        ).toInt()
+    private fun toast(message: String) {
+        Toast.makeText(
+            this,
+            message,
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     override fun onDestroy() {
-        executor.shutdown()
+        worker.shutdownNow()
         super.onDestroy()
     }
 }
